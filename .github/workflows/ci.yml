@@ -1,0 +1,56 @@
+name: CodeCracker CI
+
+# Repo-root workflow so GitHub Actions discovers it in this monorepo.
+# Mirrors codecracker/.github/workflows/ci.yml (kept for a future standalone repo).
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "codecracker/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "codecracker/**"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  test:
+    name: pytest (ast_parser + context_builder)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: codecracker
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: codecracker/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run focused unit tests
+        run: |
+          pytest \
+            tests/test_ast_parser.py \
+            tests/test_context_builder.py
+
+      - name: Pipeline hygiene — import smoke check
+        run: |
+          python -c "from codecracker.ast_parser import parse_repository; from codecracker.context_builder import build_repo_map; print('ok')"
