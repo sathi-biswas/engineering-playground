@@ -25,6 +25,18 @@ class Settings:
     max_file_bytes: int = 200_000
     max_tour_steps: int = 25
     shallow_clone: bool = True
+    # Partial clone (blob:none) — less bandwidth on large public repos
+    clone_filter_blob_none: bool = True
+    # Minimum seconds between *fresh* clones (0 disables). Reuses are free.
+    min_clone_interval_seconds: int = field(
+        default_factory=lambda: int(os.getenv("CODECRACKER_CLONE_INTERVAL", "5"))
+    )
+    # Optional PAT — authenticated git HTTPS raises GitHub rate limits substantially
+    github_token: str | None = field(
+        default_factory=lambda: os.getenv("GITHUB_TOKEN")
+        or os.getenv("GH_TOKEN")
+        or os.getenv("CODECRACKER_GITHUB_TOKEN")
+    )
 
     # LLM — set OPENAI_API_KEY or ANTHROPIC_API_KEY; otherwise heuristic mode
     llm_provider: str = field(

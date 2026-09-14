@@ -1,7 +1,8 @@
 """Stage 4 — Output Generator.
 
 Writes a README.md (and optional JSON sidecar) capturing architecture,
-data flow, key files, Mermaid diagram, and the guided file-by-file tour.
+data flow, key files, Mermaid diagram, guided file-by-file tour, and a
+**runtime benchmark table** for the cracked target repo.
 """
 
 from __future__ import annotations
@@ -13,8 +14,9 @@ from pathlib import Path
 from jinja2 import Template
 from rich.console import Console
 
+from .benchmark import format_cost, format_seconds
 from .config import Settings
-from .models import ArchitectureReport, RepoMap
+from .models import ArchitectureReport, BenchmarkStats, RepoMap
 
 console = Console()
 
@@ -65,6 +67,18 @@ README_TEMPLATE = Template(
 │    (Writes generated README.md)      │
 └──────────────────────────────────────┘
 ```
+
+---
+
+## Execution efficiency (this run)
+
+| Target Repo | Files Analyzed | Time (Heuristic) | Time (LLM) | Approx. Token Cost |
+|-------------|----------------|------------------|------------|--------------------|
+| [{{ benchmark.target_repo }}]({{ repo_url }}) | {{ benchmark.files_analyzed }} | {{ heuristic_time }}{% if provider == 'heuristic' %}{% else %} (est.){% endif %} | {{ llm_time }}{% if provider != 'heuristic' %}{% else %} (est.){% endif %} | {{ token_cost }}{% if provider == 'heuristic' %} (est.){% endif %} |
+
+{{ benchmark.notes }}
+
+Stage timings (clone={{ clone_s }}, map={{ map_s }}, synthesize={{ synth_s }}, write={{ write_s }}).
 
 ---
 
@@ -151,7 +165,11 @@ Re-run CodeCracker after major refactors to refresh the tour.*
 )
 
 
-def render_readme(repo_map: RepoMap, report: ArchitectureReport) -> str:
+def render_readme(
+    repo_map: RepoMap,
+    report: ArchitectureReport,
+    benchmark: BenchmarkStats,
+) -> str:
     langs = ", ".join(
         f"{k}={v}"
         for k, v in sorted(
@@ -175,6 +193,14 @@ def render_readme(repo_map: RepoMap, report: ArchitectureReport) -> str:
         languages=langs or "—",
         entrypoints=", ".join(f"`{e}`" for e in repo_map.entrypoints[:8]) or "—",
         tree_text="\n".join(repo_map.tree_text.splitlines()[:80]),
+        benchmark=benchmark,
+        heuristic_time=format_seconds(benchmark.time_heuristic_s),
+        llm_time=format_seconds(benchmark.time_llm_s),
+        token_cost=format_cost(benchmark.approx_token_cost_usd),
+        clone_s=format_seconds(benchmark.clone_s),
+        map_s=format_seconds(benchmark.map_s),
+        synth_s=format_seconds(benchmark.synth_s),
+        write_s=format_seconds(benchmark.write_s),
     )
 
 
@@ -183,17 +209,27 @@ def write_outputs(
     report: ArchitectureReport,
     settings: Settings | None = None,
     out_dir: Path | None = None,
+    benchmark: BenchmarkStats | None = None,
 ) -> Path:
     """Write README.md + report.json; return the output directory."""
     settings = settings or Settings()
     settings.ensure_dirs()
+
+    if benchmark is None:
+        from .benchmark import build_benchmark
+
+        benchmark = build_benchmark(
+            repo_map, report, clone_s=0.0, map_s=0.0, synth_s=0.0, write_s=0.0
+        )
 
     slug = repo_map.repo_name.replace("/", "__")
     dest = out_dir or (settings.output_dir / slug)
     dest.mkdir(parents=True, exist_ok=True)
 
     readme_path = dest / "README.md"
-    readme_path.write_text(render_readme(repo_map, report), encoding="utf-8")
+    readme_path.write_text(
+        render_readme(repo_map, report, benchmark), encoding="utf-8"
+    )
 
     sidecar = {
         "repo_url": repo_map.repo_url,
@@ -215,11 +251,11 @@ def write_outputs(
         "languages": repo_map.language_counts,
         "entrypoints": repo_map.entrypoints,
         "metadata": repo_map.metadata,
+        "benchmark": benchmark.as_dict(),
     }
     (dest / "report.json").write_text(
         json.dumps(sidecar, indent=2), encoding="utf-8"
     )
-    # Also dump the packed prompt for teaching / debugging the strategy
     (dest / "prompt_context.txt").write_text(report.raw_prompt, encoding="utf-8")
 
     console.print(f"[green]✓[/] Wrote [bold]{readme_path}[/]")

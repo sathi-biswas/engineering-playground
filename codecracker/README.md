@@ -10,6 +10,7 @@ structure, builds a structural map, then synthesizes:
 - Mermaid.js diagram
 - **Guided file-by-file walkthrough** (what to open next and what to look for)
 - A generated `README.md` you can share with teammates
+- A **per-run execution efficiency** table for the cracked target
 
 Designed as a teaching demo of how engineers (and agents) should approach unfamiliar code — not by dumping the whole repo into a context window, but by **establishing a guided tour**.
 
@@ -49,10 +50,10 @@ Designed as a teaching demo of how engineers (and agents) should approach unfami
 
 | Stage | Module | Responsibility |
 |-------|--------|----------------|
-| 1 | `cloner.py` + `ast_parser.py` | Shallow-clone the repo; skip `node_modules` / build artifacts; AST-parse Python and heuristically parse JS/TS/Go/Java/Rust/Ruby for imports, classes, functions |
+| 1 | `cloner.py` + `ast_parser.py` | Shallow-clone with **hooks disabled** (`core.hooksPath` → `/dev/null`), path-safe dest under `.repos/`, optional `GITHUB_TOKEN` + clone cooldown for rate limits; skip vendor/build artifacts; AST-parse Python and heuristically parse JS/TS/Go/Java/Rust/Ruby for imports, classes, functions |
 | 2 | `context_builder.py` | ASCII folder tree, entrypoint detection, import-graph centrality ranking, packed LLM context JSON |
 | 3 | `llm_engine.py` | Prompt strategy → architecture + Mermaid + guided tour. Uses OpenAI / Anthropic when keys exist; otherwise a deterministic **heuristic** synthesizer (always works offline) |
-| 4 | `output_generator.py` | Jinja-rendered `README.md`, plus `report.json` and `prompt_context.txt` |
+| 4 | `output_generator.py` | Jinja-rendered `README.md` (incl. runtime benchmark table), plus `report.json` and `prompt_context.txt` |
 
 ---
 
@@ -65,45 +66,44 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # Works offline (heuristic mode) — no API key required
-python -m codecracker crack https://github.com/pallets/flask
+python -m codecracker crack https://github.com/<owner>/<repo>
 
 # Or analyze a local checkout
-python -m codecracker crack https://github.com/owner/repo --local /path/to/checkout
+python -m codecracker crack https://github.com/<owner>/<repo> --local /path/to/checkout
 ```
-
-### Tests & CI
-
-Focused unit tests cover the parser and structural map stages:
-
-```bash
-pytest tests/test_ast_parser.py tests/test_context_builder.py
-```
-
-GitHub Actions (`.github/workflows/ci.yml`) runs those tests on Python 3.11 and 3.12 for every push/PR touching `codecracker/`.
 
 Output lands in `output/<owner>__<repo>/`:
 
 ```
-output/pallets__flask/
-├── README.md            # architecture + guided tour
-├── report.json          # machine-readable tour
+output/<owner>__<repo>/
+├── README.md            # architecture + guided tour + runtime benchmark
+├── report.json          # machine-readable tour + benchmark
 └── prompt_context.txt   # exact context fed to the LLM strategy
 ```
 
 Re-print a tour later:
 
 ```bash
-python -m codecracker tour output/pallets__flask/report.json
+python -m codecracker tour output/<owner>__<repo>/report.json
 ```
+
+### Tests & CI
+
+```bash
+pytest tests/test_ast_parser.py tests/test_context_builder.py tests/test_cloner.py tests/test_benchmark.py
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs those tests on Python 3.11 and 3.12 for every push/PR touching `codecracker/`.
 
 ### Optional LLM backends
 
 ```bash
 cp .env.example .env
 # set OPENAI_API_KEY or ANTHROPIC_API_KEY
+# optional: GITHUB_TOKEN for higher clone rate limits
 
-python -m codecracker crack https://github.com/encode/httpx --provider openai
-python -m codecracker crack https://github.com/encode/httpx --provider anthropic
+python -m codecracker crack https://github.com/<owner>/<repo> --provider openai
+python -m codecracker crack https://github.com/<owner>/<repo> --provider anthropic
 ```
 
 ---
@@ -141,18 +141,19 @@ Options:
 
 | Path | Role |
 |------|------|
-| `codecracker/cloner.py` | Normalize GitHub URLs; shallow clone / refresh |
+| `codecracker/cloner.py` | Normalize GitHub URLs; hook-safe shallow clone / refresh; path containment; clone rate-limit |
 | `codecracker/ast_parser.py` | Filter non-code; Python AST + multi-lang heuristics; import edges |
 | `codecracker/context_builder.py` | Tree, entrypoints, key-file ranking, LLM context pack |
 | `codecracker/llm_engine.py` | Prompt strategy + OpenAI/Anthropic/heuristic synthesizers |
-| `codecracker/output_generator.py` | README / JSON / prompt dump |
-| `codecracker/pipeline.py` | Wires stages 1→4 |
+| `codecracker/benchmark.py` | Per-run timing + token-cost estimates for the cracked target |
+| `codecracker/output_generator.py` | README / JSON / prompt dump (incl. efficiency table) |
+| `codecracker/pipeline.py` | Wires stages 1→4 and records stage timings |
 | `codecracker/cli.py` | Typer CLI (`crack`, `tour`) |
-| `codecracker/models.py` | Shared dataclasses (`RepoMap`, `GuidedStep`, …) |
+| `codecracker/models.py` | Shared dataclasses (`RepoMap`, `GuidedStep`, `BenchmarkStats`, …) |
 
 ---
 
-## Design notes (for the demo narrative)
+## Design notes
 
 1. **Filter first** — big repos drown you; skip vendor/build and cap file count.  
 2. **Structure before prose** — tree + import graph beats raw file contents for orientation.  
@@ -160,13 +161,11 @@ Options:
 4. **Always have an offline path** — heuristic mode proves the pipeline without API spend.  
 5. **Tour > summary** — summaries fade; an ordered reading path is how humans onboard.
 
----
+### Execution efficiency (runtime)
 
-## Example targets
+Each cracked-repo README gets a live table for **that run** (also under `benchmark` in `report.json`):
 
-Good demos (public, approachable size):
+| Target Repo | Files Analyzed | Time (Heuristic) | Time (LLM) | Approx. Token Cost |
+|-------------|----------------|------------------|------------|--------------------|
 
-- `https://github.com/pallets/flask`
-- `https://github.com/encode/httpx`
-- `https://github.com/psf/requests`
-- `https://github.com/tiangolo/fastapi`
+Wired by `pipeline.py` → `benchmark.py` → `output_generator.py`. Heuristic times are measured wall-clock (map → synthesize → write; clone excluded). When running offline, LLM time/cost are estimated from packed prompt size so the table still fills both columns.

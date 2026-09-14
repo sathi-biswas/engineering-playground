@@ -121,3 +121,41 @@ class ArchitectureReport:
     how_to_extend: str
     raw_prompt: str = ""
     provider: str = "heuristic"
+
+
+@dataclass
+class BenchmarkStats:
+    """Per-run execution efficiency for the cracked target repo."""
+
+    target_repo: str
+    files_analyzed: int
+    time_heuristic_s: float | None
+    time_llm_s: float | None
+    approx_token_cost_usd: float | None
+    provider: str
+    clone_s: float = 0.0
+    map_s: float = 0.0
+    synth_s: float = 0.0
+    write_s: float = 0.0
+    prompt_chars: int = 0
+    est_input_tokens: int = 0
+    est_output_tokens: int = 0
+    notes: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "target_repo": self.target_repo,
+            "files_analyzed": self.files_analyzed,
+            "time_heuristic_s": self.time_heuristic_s,
+            "time_llm_s": self.time_llm_s,
+            "approx_token_cost_usd": self.approx_token_cost_usd,
+            "provider": self.provider,
+            "clone_s": self.clone_s,
+            "map_s": self.map_s,
+            "synth_s": self.synth_s,
+            "write_s": self.write_s,
+            "prompt_chars": self.prompt_chars,
+            "est_input_tokens": self.est_input_tokens,
+            "est_output_tokens": self.est_output_tokens,
+            "notes": self.notes,
+        }

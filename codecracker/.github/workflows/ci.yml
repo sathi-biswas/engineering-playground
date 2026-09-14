@@ -41,7 +41,9 @@ jobs:
         run: |
           pytest \
             tests/test_ast_parser.py \
-            tests/test_context_builder.py
+            tests/test_context_builder.py \
+            tests/test_cloner.py \
+            tests/test_benchmark.py
 
       - name: Pipeline hygiene — import smoke check
         run: |
