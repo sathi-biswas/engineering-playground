@@ -51,8 +51,8 @@ Rules:
 """
 
 
-def build_user_prompt(repo_map: RepoMap) -> str:
-    ctx = pack_llm_context(repo_map)
+def build_user_prompt(repo_map: RepoMap, settings: Settings | None = None) -> str:
+    ctx = pack_llm_context(repo_map, settings=settings)
     return (
         f"Analyze this repository and produce the JSON brief.\n\n"
         f"Repository: {repo_map.repo_url}\n\n"
@@ -305,7 +305,7 @@ def synthesize_heuristic(repo_map: RepoMap, settings: Settings) -> ArchitectureR
         key_files=key_files,
         guided_tour=tour,
         how_to_extend=how,
-        raw_prompt=build_user_prompt(repo_map),
+        raw_prompt=build_user_prompt(repo_map, settings),
         provider="heuristic",
     )
 
@@ -415,7 +415,7 @@ def synthesize(
 ) -> ArchitectureReport:
     """Stage 3 entrypoint — LLM when available, else heuristic."""
     settings = settings or Settings()
-    raw_prompt = build_user_prompt(repo_map)
+    raw_prompt = build_user_prompt(repo_map, settings)
     chosen = resolve_provider(settings, provider)
 
     if chosen == "heuristic":

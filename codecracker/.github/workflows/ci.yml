@@ -43,7 +43,8 @@ jobs:
             tests/test_ast_parser.py \
             tests/test_context_builder.py \
             tests/test_cloner.py \
-            tests/test_benchmark.py
+            tests/test_benchmark.py \
+            tests/test_token_budget.py
 
       - name: Pipeline hygiene — import smoke check
         run: |

@@ -50,8 +50,8 @@ Designed as a teaching demo of how engineers (and agents) should approach unfami
 
 | Stage | Module | Responsibility |
 |-------|--------|----------------|
-| 1 | `cloner.py` + `ast_parser.py` | Shallow-clone with **hooks disabled** (`core.hooksPath` → `/dev/null`), path-safe dest under `.repos/`, optional `GITHUB_TOKEN` + clone cooldown for rate limits; skip vendor/build artifacts; AST-parse Python and heuristically parse JS/TS/Go/Java/Rust/Ruby for imports, classes, functions |
-| 2 | `context_builder.py` | ASCII folder tree, entrypoint detection, import-graph centrality ranking, packed LLM context JSON |
+| 1 | `cloner.py` + `ast_parser.py` | Shallow-clone with **hooks disabled** (`core.hooksPath` → `/dev/null`), path-safe dest under `.repos/`, optional `GITHUB_TOKEN` + clone cooldown for rate limits; skip vendor/build artifacts; perform native AST parsing for Python and lightweight regex/heuristic static analysis for polyglot languages (JS/TS/Go/Java/Rust/Ruby). |
+| 2 | `context_builder.py` | ASCII folder tree, entrypoint detection, import-graph centrality ranking, packed LLM context JSON with a **tiktoken Token Budgeting Engine** that trims payload sections to a max-token threshold before serialize |
 | 3 | `llm_engine.py` | Prompt strategy → architecture + Mermaid + guided tour. Uses OpenAI / Anthropic when keys exist; otherwise a deterministic **heuristic** synthesizer (always works offline) |
 | 4 | `output_generator.py` | Jinja-rendered `README.md` (incl. runtime benchmark table), plus `report.json` and `prompt_context.txt` |
 
@@ -90,7 +90,7 @@ python -m codecracker tour output/<owner>__<repo>/report.json
 ### Tests & CI
 
 ```bash
-pytest tests/test_ast_parser.py tests/test_context_builder.py tests/test_cloner.py tests/test_benchmark.py
+pytest tests/test_ast_parser.py tests/test_context_builder.py tests/test_cloner.py tests/test_benchmark.py tests/test_token_budget.py
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs those tests on Python 3.11 and 3.12 for every push/PR touching `codecracker/`.
@@ -143,7 +143,7 @@ Options:
 |------|------|
 | `codecracker/cloner.py` | Normalize GitHub URLs; hook-safe shallow clone / refresh; path containment; clone rate-limit |
 | `codecracker/ast_parser.py` | Filter non-code; Python AST + multi-lang heuristics; import edges |
-| `codecracker/context_builder.py` | Tree, entrypoints, key-file ranking, LLM context pack |
+| `codecracker/context_builder.py` | Tree, entrypoints, key-file ranking, tiktoken token-budget packing |
 | `codecracker/llm_engine.py` | Prompt strategy + OpenAI/Anthropic/heuristic synthesizers |
 | `codecracker/benchmark.py` | Per-run timing + token-cost estimates for the cracked target |
 | `codecracker/output_generator.py` | README / JSON / prompt dump (incl. efficiency table) |
@@ -157,9 +157,10 @@ Options:
 
 1. **Filter first** — big repos drown you; skip vendor/build and cap file count.  
 2. **Structure before prose** — tree + import graph beats raw file contents for orientation.  
-3. **Prompt with a map, not a monologue** — Stage 3 receives ranked key files + adjacency, not the whole tree.  
+3. **Prompt with a map, not a monologue** — Stage 3 receives ranked key files + adjacency, not the whole tree. A **tiktoken Token Budgeting Engine** counts tokens and progressively trims graph/tree/key briefs before serialize so the payload stays under `CODECRACKER_CONTEXT_TOKEN_BUDGET`.  
 4. **Always have an offline path** — heuristic mode proves the pipeline without API spend.  
 5. **Tour > summary** — summaries fade; an ordered reading path is how humans onboard.
+6. **AST Parsing Trade-offs & Polyglot Roadmap** — Native Python AST parsing provides 100% exact import-edge graphs. For multi-language support (JS/TS/Go/Java/Rust/Ruby), the demo relies on lightweight static heuristics to keep external C-binding dependencies zero-install. For production/enterprise deployments, `ast_parser.py` is designed to swap in `tree-sitter` bindings for full incremental AST parsing across all major languages without breaking downstream graph-builder interfaces.
 
 ### Execution efficiency (runtime)
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import networkx as nx
@@ -216,11 +217,232 @@ def build_call_graph_summary(edges: list[ImportEdge], top_n: int = 30) -> list[d
     return [{"file": src, "imports": sorted(imps)[:15]} for src, imps in rows]
 
 
-def pack_llm_context(repo_map: RepoMap, max_chars: int = 24_000) -> str:
-    """Compact textual context for the prompt strategy engine."""
+# ---------------------------------------------------------------------------
+# Token Budgeting Engine (tiktoken)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TokenBudgetReport:
+    """Result of fitting a structural payload under a token ceiling."""
+
+    text: str
+    token_count: int
+    token_budget: int
+    encoding_name: str
+    trimmed: bool
+    trim_steps: list[str] = field(default_factory=list)
+    sections_kept: dict[str, int] = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        return {
+            "token_count": self.token_count,
+            "token_budget": self.token_budget,
+            "encoding_name": self.encoding_name,
+            "trimmed": self.trimmed,
+            "trim_steps": list(self.trim_steps),
+            "sections_kept": dict(self.sections_kept),
+        }
+
+
+class TokenBudgetingEngine:
+    """
+    Tiktoken-backed token counter that enforces a max-token threshold
+    *before* the structural map is serialized into the LLM user prompt.
+
+    Shrinks payload sections in priority order (graph → tree → key briefs)
+    until ``count_tokens(serialized) <= budget``.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_tokens: int = 6000,
+        encoding_name: str = "cl100k_base",
+        output_reserve: int = 0,
+    ) -> None:
+        if max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+        # Usable budget for the structural JSON (caller may reserve for reply)
+        self.max_tokens = max(256, max_tokens - max(0, output_reserve))
+        self.encoding_name = encoding_name
+        self._encoder = self._load_encoder(encoding_name)
+
+    @staticmethod
+    def _load_encoder(encoding_name: str):
+        try:
+            import tiktoken
+
+            try:
+                return tiktoken.get_encoding(encoding_name)
+            except Exception:  # noqa: BLE001
+                return tiktoken.get_encoding("cl100k_base")
+        except ImportError:
+            console.print(
+                "[yellow]Warning:[/] tiktoken not installed — "
+                "falling back to ~4 chars/token estimates"
+            )
+            return None
+
+    def count_tokens(self, text: str) -> int:
+        if self._encoder is not None:
+            return len(self._encoder.encode(text))
+        # Fallback mirrors OpenAI's rough rule of thumb
+        return max(1, (len(text) + 3) // 4)
+
+    def fits(self, text: str) -> bool:
+        return self.count_tokens(text) <= self.max_tokens
+
+    def serialize(self, payload: dict) -> str:
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+
+    def fit_payload(self, payload: dict) -> TokenBudgetReport:
+        """
+        Return serialized JSON guaranteed (best-effort) under ``max_tokens``.
+
+        Trim order (least → most destructive):
+          1. Shrink import_graph_top rows / imports-per-row
+          2. Truncate folder_tree lines
+          3. Drop lowest-priority key_files and shrink symbol lists
+          4. Drop optional docstring / imports fields
+          5. Hard-truncate serialized text as last resort
+        """
+        working = json.loads(json.dumps(payload))  # deep copy via JSON
+        steps: list[str] = []
+        text = self.serialize(working)
+        tokens = self.count_tokens(text)
+
+        if tokens <= self.max_tokens:
+            return TokenBudgetReport(
+                text=text,
+                token_count=tokens,
+                token_budget=self.max_tokens,
+                encoding_name=self.encoding_name,
+                trimmed=False,
+                sections_kept=self._section_sizes(working),
+            )
+
+        # --- progressive shrinks ---
+        graph = working.get("import_graph_top") or []
+        for limit, per_row in ((20, 10), (12, 6), (6, 4), (3, 3), (0, 0)):
+            if tokens <= self.max_tokens:
+                break
+            if limit == 0:
+                working["import_graph_top"] = []
+                steps.append("drop import_graph_top")
+            else:
+                working["import_graph_top"] = [
+                    {"file": row.get("file"), "imports": (row.get("imports") or [])[:per_row]}
+                    for row in graph[:limit]
+                ]
+                steps.append(f"import_graph_top→{limit}x{per_row}")
+            text = self.serialize(working)
+            tokens = self.count_tokens(text)
+
+        tree = working.get("folder_tree") or ""
+        for max_lines in (80, 40, 20, 10, 0):
+            if tokens <= self.max_tokens:
+                break
+            if max_lines == 0:
+                working["folder_tree"] = ""
+                steps.append("drop folder_tree")
+            else:
+                lines = tree.splitlines()[:max_lines]
+                working["folder_tree"] = "\n".join(lines)
+                if len(tree.splitlines()) > max_lines:
+                    working["folder_tree"] += "\n…"
+                steps.append(f"folder_tree→{max_lines} lines")
+            text = self.serialize(working)
+            tokens = self.count_tokens(text)
+
+        keys = list(working.get("key_files") or [])
+        for keep in (12, 8, 5, 3, 1):
+            if tokens <= self.max_tokens:
+                break
+            trimmed_keys = []
+            for item in keys[:keep]:
+                brief = dict(item)
+                brief["classes"] = (brief.get("classes") or [])[:4]
+                brief["functions"] = (brief.get("functions") or [])[:6]
+                brief["imports"] = (brief.get("imports") or [])[:4]
+                doc = brief.get("docstring")
+                if isinstance(doc, str):
+                    brief["docstring"] = doc[:120]
+                trimmed_keys.append(brief)
+            working["key_files"] = trimmed_keys
+            steps.append(f"key_files→{keep} (shrunk symbols)")
+            text = self.serialize(working)
+            tokens = self.count_tokens(text)
+
+        # Strip verbose fields if still over
+        if tokens > self.max_tokens:
+            for item in working.get("key_files") or []:
+                item.pop("docstring", None)
+                item.pop("imports", None)
+                item["classes"] = (item.get("classes") or [])[:2]
+                item["functions"] = (item.get("functions") or [])[:3]
+            steps.append("strip docstrings/imports from key_files")
+            text = self.serialize(working)
+            tokens = self.count_tokens(text)
+
+        # Hard truncate as last resort (keeps valid-ish prefix for the model)
+        if tokens > self.max_tokens:
+            text = self._hard_truncate(text, self.max_tokens)
+            tokens = self.count_tokens(text)
+            steps.append("hard_truncate serialized JSON")
+            working["_truncated"] = True
+
+        console.print(
+            f"[cyan]✂[/] Token budget: {tokens}/{self.max_tokens} "
+            f"({self.encoding_name}); steps={steps or ['none']}"
+        )
+        return TokenBudgetReport(
+            text=text,
+            token_count=tokens,
+            token_budget=self.max_tokens,
+            encoding_name=self.encoding_name,
+            trimmed=True,
+            trim_steps=steps,
+            sections_kept=self._section_sizes(working),
+        )
+
+    def _hard_truncate(self, text: str, budget: int) -> str:
+        """Binary-search a prefix that fits under ``budget`` tokens."""
+        if self.count_tokens(text) <= budget:
+            return text
+        marker = "\n… [truncated to token budget]"
+        lo, hi = 0, len(text)
+        best = marker
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = text[:mid] + marker
+            if self.count_tokens(candidate) <= budget:
+                best = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    @staticmethod
+    def _section_sizes(payload: dict) -> dict[str, int]:
+        return {
+            "key_files": len(payload.get("key_files") or []),
+            "import_graph_top": len(payload.get("import_graph_top") or []),
+            "folder_tree_chars": len(payload.get("folder_tree") or ""),
+        }
+
+
+def build_llm_payload(
+    repo_map: RepoMap,
+    *,
+    max_key_files: int = 18,
+    max_tree_chars: int = 4000,
+    graph_top_n: int = 30,
+) -> dict:
+    """Assemble the full (pre-budget) structural context dict."""
     by_path = {f.path: f for f in repo_map.files}
     key_briefs = []
-    for path in repo_map.key_files[:18]:
+    for path in repo_map.key_files[:max_key_files]:
         f = by_path.get(path)
         if not f:
             key_briefs.append({"path": path, "note": "manifest / non-parsed"})
@@ -237,19 +459,66 @@ def pack_llm_context(repo_map: RepoMap, max_chars: int = 24_000) -> str:
             }
         )
 
-    payload = {
+    return {
         "repo_url": repo_map.repo_url,
         "repo_name": repo_map.repo_name,
         "languages": repo_map.language_counts,
         "entrypoints": repo_map.entrypoints,
-        "folder_tree": repo_map.tree_text[:4000],
+        "folder_tree": repo_map.tree_text[:max_tree_chars],
         "key_files": key_briefs,
-        "import_graph_top": build_call_graph_summary(repo_map.edges),
+        "import_graph_top": build_call_graph_summary(repo_map.edges, top_n=graph_top_n),
         "file_count": len(repo_map.files),
     }
-    text = json.dumps(payload, indent=2)
-    if len(text) > max_chars:
+
+
+def pack_llm_context(
+    repo_map: RepoMap,
+    max_chars: int | None = None,
+    *,
+    settings: Settings | None = None,
+    budget_engine: TokenBudgetingEngine | None = None,
+) -> str:
+    """
+    Compact textual context for the prompt strategy engine.
+
+    Prefer tiktoken token budgeting (``TokenBudgetingEngine``). ``max_chars``
+    remains as a legacy hard cap applied after token fitting.
+    """
+    settings = settings or Settings()
+    engine = budget_engine or TokenBudgetingEngine(
+        max_tokens=settings.llm_context_token_budget,
+        encoding_name=settings.tiktoken_encoding,
+        # Leave headroom when a combined window is implied via reserve.
+        output_reserve=settings.llm_output_token_reserve
+        if settings.llm_output_token_reserve > 0
+        and settings.llm_output_token_reserve
+        < settings.llm_context_token_budget
+        else 0,
+    )
+
+    payload = build_llm_payload(repo_map)
+    report = engine.fit_payload(payload)
+
+    # Stash budget metadata for report.json / debugging
+    repo_map.metadata["token_budget"] = report.as_dict()
+
+    text = report.text
+    # Optional legacy char ceiling (disabled when None)
+    if max_chars is not None and len(text) > max_chars:
         text = text[: max_chars - 20] + "\n… [truncated]"
+        repo_map.metadata.setdefault("token_budget", {})["char_truncated"] = True
+
+    if report.trimmed:
+        console.print(
+            f"[green]✓[/] Context fitted to "
+            f"{report.token_count}/{report.token_budget} tokens "
+            f"via {report.encoding_name}"
+        )
+    else:
+        console.print(
+            f"[dim]Token budget OK: {report.token_count}/{report.token_budget} "
+            f"({report.encoding_name})[/]"
+        )
     return text
 
 

@@ -38,6 +38,26 @@ class Settings:
         or os.getenv("CODECRACKER_GITHUB_TOKEN")
     )
 
+    # Token budgeting (tiktoken) — trim structural context before LLM serialize
+    llm_context_token_budget: int = field(
+        default_factory=lambda: int(
+            os.getenv("CODECRACKER_CONTEXT_TOKEN_BUDGET", "6000")
+        )
+    )
+    # Reserve tokens for system prompt + model JSON reply inside the same call.
+    # When > 0 and less than llm_context_token_budget, usable context =
+    # budget − reserve (treat budget as a combined window).
+    llm_output_token_reserve: int = field(
+        default_factory=lambda: int(
+            os.getenv("CODECRACKER_OUTPUT_TOKEN_RESERVE", "0")
+        )
+    )
+    tiktoken_encoding: str = field(
+        default_factory=lambda: os.getenv(
+            "CODECRACKER_TIKTOKEN_ENCODING", "cl100k_base"
+        )
+    )
+
     # LLM — set OPENAI_API_KEY or ANTHROPIC_API_KEY; otherwise heuristic mode
     llm_provider: str = field(
         default_factory=lambda: os.getenv("CODECRACKER_LLM", "auto")
