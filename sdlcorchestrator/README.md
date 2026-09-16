@@ -1,0 +1,160 @@
+# Automated AI SDLC Orchestrator
+
+Production-ready Python microservice that coordinates **four specialized AI agents** through a stateful **LangGraph** workflow to ingest bug reports (Google Drive RAG), analyze repositories, generate patches with tests, open GitHub PRs, and perform automated code review.
+
+```
+Bug Report (GDrive) → Analyze Code → Fix + Test + PR → Code Review
+         Agent 1            Agent 2         Agent 3         Agent 4
+```
+
+## Architecture
+
+| Component | Role | Model Tier (FinOps) |
+|-----------|------|---------------------|
+| **Agent 1** `agent1_bug_reader` | Ingest bug specs via Google Drive RAG | Low / Mid |
+| **Agent 2** `agent2_code_analyzer` | AST / file-tree analysis & root-cause | Mid / High |
+| **Agent 3** `agent3_bug_fixer` | Patch, unit tests, pytest, GitHub PR | Mid (code) / Low (test eval) |
+| **Agent 4** `agent4_code_reviewer` | PR review, inline comments, approve/reject | High |
+
+**Confidence gate:** analysis / fix / review must reach **≥ 0.70** (configurable). Failed tests retry Agent 3 up to **2** times. `NEEDS_REVISION` can loop back to Agent 3.
+
+Artifacts are written as structured Markdown under [`output/`](output/).
+
+## Project Layout
+
+```
+├── config.py                 # Settings, API keys, model tiers, paths
+├── state.py                  # SDLCState TypedDict & Pydantic schemas
+├── graph.py                  # LangGraph orchestration & routers
+├── main.py                   # CLI + optional FastAPI trigger
+├── requirements.txt
+├── utils/
+│   ├── logger.py             # Thought log + /output artifact writer
+│   ├── git_helper.py         # Branch, commit, push, PR, review
+│   ├── test_runner.py        # Isolated pytest subprocess runner
+│   └── model_router.py       # FinOps LLM factory (OpenAI / Anthropic)
+├── tools/
+│   ├── gdrive_rag.py         # Drive auth, loader, FAISS/Chroma RAG
+│   └── code_parser.py        # AST + file tree analyzer
+└── agents/
+    ├── agent1_bug_reader.py
+    ├── agent2_code_analyzer.py
+    ├── agent3_bug_fixer.py
+    └── agent4_code_reviewer.py
+```
+
+## Prerequisites
+
+- Python **3.11+**
+- A local **git** checkout of the target repository
+- API keys (see below)
+- Optional: Google Cloud service account with Drive read access
+- Optional: `GITHUB_TOKEN` with `repo` scope for PR create/review
+
+## Setup
+
+```bash
+cd sdlcorchestrator
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env        # then edit values
+```
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENAI_API_KEY` | Yes* | OpenAI key (default provider) |
+| `ANTHROPIC_API_KEY` | Yes* | Used when `LLM_PROVIDER=anthropic` |
+| `LLM_PROVIDER` | No | `openai` (default) or `anthropic` |
+| `GITHUB_TOKEN` | For PRs | Fine-grained or classic token with PR permissions |
+| `GOOGLE_APPLICATION_CREDENTIALS` | For Drive | Path to service-account JSON |
+| `GDRIVE_FOLDER_ID` | Optional | Default Drive folder for bulk load |
+| `GITHUB_REPO_NAME` | Optional | Default `owner/repo` |
+| `TARGET_REPO_PATH` | Optional | Default local repo path |
+| `MODEL_LOW` / `MODEL_MID` / `MODEL_HIGH` | No | Override FinOps model IDs |
+| `ENABLE_REVISION_LOOP` | No | `true`/`false` — review → fix loop |
+
+\*Without an LLM key the pipeline runs in **StubLLM dry-run** mode (useful for scaffolding / CI wiring).
+
+### Model Tier Defaults
+
+| Tier | OpenAI default | Anthropic default | Used for |
+|------|----------------|-------------------|----------|
+| Low | `gpt-4o-mini` | `claude-3-haiku-20240307` | Parsing, test-output eval |
+| Mid | `gpt-4o` | `claude-3-5-sonnet-20241022` | RAG correlation, patches |
+| High | `o3-mini` | `claude-3-5-sonnet-20241022` | Final review / edge cases |
+
+Override via env, e.g. `MODEL_HIGH=gpt-4o`.
+
+### Google Drive
+
+1. Create a GCP service account and download JSON key.
+2. Share the bug-report Drive file/folder with the service-account email.
+3. Set `GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/sa.json`.
+
+**Offline / demo:** pass a local Markdown file path as `--gdrive-file-id` — no Drive credentials needed.
+
+## Usage
+
+### CLI (one-shot)
+
+```bash
+python main.py \
+  --bug-id BUG-1042 \
+  --gdrive-file-id ./samples/sample_bug_report.md \
+  --repo-path /path/to/target/repo \
+  --github-repo your-org/your-repo \
+  --dump-state
+```
+
+### FastAPI trigger
+
+```bash
+python main.py --bug-id unused --gdrive-file-id unused --serve --port 8080
+```
+
+```bash
+curl -X POST http://localhost:8080/pipeline/run \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "bug_id": "BUG-1042",
+    "gdrive_file_id": "./samples/sample_bug_report.md",
+    "target_repo_path": "/path/to/target/repo",
+    "github_repo_name": "your-org/your-repo"
+  }'
+```
+
+Health: `GET /health` · Graph nodes: `GET /graph`
+
+## Output Artifacts
+
+| File | Producer |
+|------|----------|
+| `output/01_bug_description.md` | Agent 1 |
+| `output/02_code_analysis.md` | Agent 2 |
+| `output/03_patch_and_test_execution.md` | Agent 3 |
+| `output/04_code_review_decision.md` | Agent 4 |
+| `output/05_pipeline_summary.md` | Finalize |
+| `output/00_pipeline_halted.md` | Error handler |
+| `output/thought_process.log` | All agents |
+
+## Routing & Error Handling
+
+1. After Agent 2: if `analysis_confidence < 0.70` → `error_handler`.
+2. After Agent 3: if tests fail and `fix_attempt < max_fix_retries` → retry Agent 3; else → `error_handler`.
+3. After Agent 4: if `NEEDS_REVISION` and revision loop enabled → Agent 3; if `REJECTED` → `error_handler`; if `APPROVED` → `finalize`.
+4. Every node catches exceptions, appends to `error_logs`, and writes fallback error artifacts under `/output`.
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Completed (approved or finalized without hard failure) |
+| `1` | Pipeline halted / failed |
+| `2` | Review rejected |
+
+## License
+
+Internal engineering playground — adapt as needed for your org.
