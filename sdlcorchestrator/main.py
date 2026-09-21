@@ -26,8 +26,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bug-id", required=True, help="Unique bug identifier")
     parser.add_argument(
         "--gdrive-file-id",
-        required=True,
-        help="Google Drive file ID OR local path to a bug-report Markdown/text file",
+        default=None,
+        help="Google Drive file ID OR local path to a bug-report Markdown/text file "
+        "(defaults to GDRIVE_BUG_FILE_ID from .env)",
     )
     parser.add_argument(
         "--repo-path",
@@ -65,10 +66,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def build_initial_state(args: argparse.Namespace) -> SDLCState:
     """Map CLI args into an SDLCState seed dict."""
+    settings = get_settings()
+    gdrive_file_id = args.gdrive_file_id or settings.gdrive_bug_file_id
+    if not gdrive_file_id:
+        raise SystemExit(
+            "Missing bug report source: pass --gdrive-file-id or set GDRIVE_BUG_FILE_ID in .env"
+        )
     repo = Path(args.repo_path).expanduser().resolve()
     return {
         "bug_id": args.bug_id,
-        "gdrive_file_id": args.gdrive_file_id,
+        "gdrive_file_id": gdrive_file_id,
         "target_repo_path": str(repo),
         "github_repo_name": args.github_repo,
         "error_logs": [],

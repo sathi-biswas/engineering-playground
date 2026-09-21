@@ -6,10 +6,12 @@ __pycache__/
 .eggs/
 dist/
 build/
-.env
-.vector_store/
 credentials/
 *.pem
+credentials.json
+!credentials/.gitkeep
+.env
+.vector_store/
 .DS_Store
 .pytest_cache/
 .mypy_cache/
@@ -17,3 +19,4 @@ output/*.md
 !output/README.md
 output/thought_process.log
 output/error_*.md
+

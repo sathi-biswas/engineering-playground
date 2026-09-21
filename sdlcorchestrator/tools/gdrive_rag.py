@@ -8,8 +8,11 @@ from typing import Any
 
 from config import get_settings
 from utils.logger import get_logger
+from utils.secrets import is_usable_secret
 
 logger = get_logger(__name__)
+
+_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
 class GoogleDriveRAGError(RuntimeError):
@@ -20,8 +23,9 @@ class GoogleDriveRAG:
     """Load bug-report documents from Google Drive and expose a RAG retriever.
 
     Authentication modes (first match wins):
-    1. Service-account JSON via ``GOOGLE_APPLICATION_CREDENTIALS``
-    2. Local OAuth token at ``credentials/token.json`` (interactive fallback)
+    1. Service-account JSON (``type: service_account``)
+    2. Existing OAuth user token (``credentials/token.json`` or authorized-user JSON)
+    3. OAuth Desktop/Web client JSON (``installed`` / ``web``) → interactive consent
 
     When Drive credentials are unavailable, falls back to reading a local
     Markdown/text file whose path is passed as ``gdrive_file_id`` (useful for
@@ -34,6 +38,8 @@ class GoogleDriveRAG:
         self.persist_dir.mkdir(parents=True, exist_ok=True)
         self.credentials_path = settings.google_application_credentials
         self.folder_id = settings.gdrive_folder_id
+        self.project_root = settings.project_root
+        self.token_path = self.project_root / "credentials" / "token.json"
         self._vectorstore: Any = None
         self._docs: list[Any] = []
 
@@ -42,29 +48,66 @@ class GoogleDriveRAG:
     # ------------------------------------------------------------------
 
     def _build_credentials(self) -> Any:
-        """Build Google API credentials from service account or OAuth token."""
-        if self.credentials_path and Path(self.credentials_path).exists():
-            from google.oauth2 import service_account
+        """Build Google API credentials from service account or OAuth client."""
+        from google.auth.transport.requests import Request
+        from google.oauth2 import service_account
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
 
-            scopes = ["https://www.googleapis.com/auth/drive.readonly"]
-            logger.info("Using service-account credentials: %s", self.credentials_path)
-            return service_account.Credentials.from_service_account_file(
-                str(self.credentials_path),
-                scopes=scopes,
+        # 1) Reuse previously saved user token
+        if self.token_path.exists():
+            logger.info("Using cached OAuth token: %s", self.token_path)
+            creds = Credentials.from_authorized_user_file(str(self.token_path), _DRIVE_SCOPES)
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                self._persist_token(creds)
+            if creds and creds.valid:
+                return creds
+
+        cred_path = Path(self.credentials_path) if self.credentials_path else None
+        if not cred_path or not cred_path.exists():
+            raise GoogleDriveRAGError(
+                "No Google credentials found. Set GOOGLE_APPLICATION_CREDENTIALS "
+                "to a service-account JSON or OAuth Desktop client JSON. "
+                "For offline demos, pass a local file path as gdrive_file_id."
             )
 
-        token_path = Path("credentials/token.json")
-        if token_path.exists():
-            from google.oauth2.credentials import Credentials
+        raw = json.loads(cred_path.read_text(encoding="utf-8"))
 
-            logger.info("Using OAuth token: %s", token_path)
-            return Credentials.from_authorized_user_file(str(token_path))
+        # 2) Service account
+        if raw.get("type") == "service_account" or "client_email" in raw:
+            logger.info("Using service-account credentials: %s", cred_path)
+            return service_account.Credentials.from_service_account_file(
+                str(cred_path),
+                scopes=_DRIVE_SCOPES,
+            )
+
+        # 3) Authorized-user token stored directly in GOOGLE_APPLICATION_CREDENTIALS
+        if "refresh_token" in raw and "token" in raw:
+            logger.info("Using authorized-user credentials file: %s", cred_path)
+            return Credentials.from_authorized_user_file(str(cred_path), _DRIVE_SCOPES)
+
+        # 4) OAuth Desktop / Web client → interactive consent (first run)
+        if "installed" in raw or "web" in raw:
+            logger.info(
+                "OAuth client detected (%s). Starting browser consent flow…",
+                "installed" if "installed" in raw else "web",
+            )
+            flow = InstalledAppFlow.from_client_secrets_file(str(cred_path), _DRIVE_SCOPES)
+            creds = flow.run_local_server(port=0)
+            self._persist_token(creds)
+            return creds
 
         raise GoogleDriveRAGError(
-            "No Google credentials found. Set GOOGLE_APPLICATION_CREDENTIALS "
-            "or provide credentials/token.json. For offline demos, pass a local "
-            "file path as gdrive_file_id."
+            f"Unrecognized Google credentials format in {cred_path}. "
+            "Expected service_account, authorized-user token, or OAuth installed/web client."
         )
+
+    def _persist_token(self, creds: Any) -> None:
+        """Save OAuth token for subsequent non-interactive runs."""
+        self.token_path.parent.mkdir(parents=True, exist_ok=True)
+        self.token_path.write_text(creds.to_json(), encoding="utf-8")
+        logger.info("Saved OAuth token to %s", self.token_path)
 
     # ------------------------------------------------------------------
     # Loading
@@ -82,13 +125,7 @@ class GoogleDriveRAG:
         except GoogleDriveRAGError:
             raise
         except Exception as exc:
-            # Soft fallback: treat file_id as inline text for dry-run
-            if len(file_id) > 20 and not file_id.startswith("http"):
-                logger.warning(
-                    "Drive download failed (%s); treating file_id as inline content", exc
-                )
-                return file_id
-            raise GoogleDriveRAGError(f"Failed to load file {file_id}: {exc}") from exc
+            raise GoogleDriveRAGError(f"Failed to load Drive file {file_id}: {exc}") from exc
 
     def _download_from_drive(self, file_id: str) -> str:
         """Fetch file content via the Google Drive REST API."""
@@ -99,19 +136,21 @@ class GoogleDriveRAG:
         creds = self._build_credentials()
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-        meta = service.files().get(fileId=file_id, fields="id,name,mimeType").execute()
+        meta = (
+            service.files()
+            .get(fileId=file_id, fields="id,name,mimeType", supportsAllDrives=True)
+            .execute()
+        )
         mime = meta.get("mimeType", "")
         name = meta.get("name", file_id)
         logger.info("Downloading Drive file '%s' (%s)", name, mime)
 
-        # Google Docs → export as plain text / markdown-ish
+        # Google Docs → export as plain text
         if mime.startswith("application/vnd.google-apps"):
             export_mime = "text/plain"
-            if "document" in mime:
-                export_mime = "text/plain"
             request = service.files().export_media(fileId=file_id, mimeType=export_mime)
         else:
-            request = service.files().get_media(fileId=file_id)
+            request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
 
         buffer = io.BytesIO()
         downloader = MediaIoBaseDownload(buffer, request)
@@ -151,13 +190,13 @@ class GoogleDriveRAG:
     # ------------------------------------------------------------------
 
     def build_index(self, texts: list[str], metadatas: list[dict] | None = None) -> Any:
-        """Chunk texts and build a FAISS vector store (falls back to Chroma)."""
+        """Chunk texts and build a FAISS vector store (FakeEmbeddings offline)."""
         from langchain_text_splitters import RecursiveCharacterTextSplitter
 
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
         docs_text = splitter.create_documents(texts, metadatas=metadatas)
-
         embeddings = self._get_embeddings()
+
         try:
             from langchain_community.vectorstores import FAISS
 
@@ -165,29 +204,45 @@ class GoogleDriveRAG:
             index_path = self.persist_dir / "faiss_index"
             self._vectorstore.save_local(str(index_path))
             logger.info("Built FAISS index with %d chunks", len(docs_text))
+            return self._vectorstore
         except Exception as faiss_exc:
-            logger.warning("FAISS unavailable (%s); falling back to Chroma", faiss_exc)
-            from langchain_community.vectorstores import Chroma
+            logger.warning("FAISS build failed (%s); retrying with FakeEmbeddings", faiss_exc)
 
-            self._vectorstore = Chroma.from_documents(
-                docs_text,
-                embeddings,
-                persist_directory=str(self.persist_dir / "chroma"),
-            )
-            logger.info("Built Chroma index with %d chunks", len(docs_text))
+        from langchain_community.embeddings import FakeEmbeddings
+        from langchain_community.vectorstores import FAISS
 
+        self._vectorstore = FAISS.from_documents(docs_text, FakeEmbeddings(size=384))
+        logger.info("Built FAISS index with FakeEmbeddings (%d chunks)", len(docs_text))
         return self._vectorstore
 
     def _get_embeddings(self) -> Any:
-        """Return OpenAI embeddings, or a cheap hash-based stub offline."""
+        """Return Gemini embeddings (free), OpenAI embeddings, or FakeEmbeddings."""
         settings = get_settings()
-        key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
-        if key:
+
+        gemini_key = (
+            settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else None
+        )
+        if is_usable_secret(gemini_key, min_length=20):
+            try:
+                from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+                logger.info("Using GoogleGenerativeAIEmbeddings for RAG")
+                return GoogleGenerativeAIEmbeddings(
+                    model="models/text-embedding-004",
+                    google_api_key=gemini_key,
+                )
+            except Exception as exc:
+                logger.warning("Gemini embeddings unavailable (%s)", exc)
+
+        openai_key = (
+            settings.openai_api_key.get_secret_value() if settings.openai_api_key else None
+        )
+        if is_usable_secret(openai_key):
             from langchain_openai import OpenAIEmbeddings
 
-            return OpenAIEmbeddings(api_key=key)
+            return OpenAIEmbeddings(api_key=openai_key)
 
-        logger.warning("No OpenAI key — using FakeEmbeddings for offline RAG")
+        logger.warning("No usable embedding key — using FakeEmbeddings for offline RAG")
         from langchain_community.embeddings import FakeEmbeddings
 
         return FakeEmbeddings(size=384)
@@ -217,8 +272,8 @@ def dump_credentials_hint() -> str:
     """Return a human-readable credentials setup hint."""
     return json.dumps(
         {
-            "service_account": "Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json",
-            "oauth": "Place OAuth token at credentials/token.json",
+            "service_account": "Set GOOGLE_APPLICATION_CREDENTIALS to sa.json (type=service_account)",
+            "oauth_desktop": "Use OAuth Desktop client JSON; first run opens browser, token saved to credentials/token.json",
             "offline": "Pass a local .md/.txt path as --gdrive-file-id",
         },
         indent=2,

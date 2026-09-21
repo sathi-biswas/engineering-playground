@@ -3,6 +3,8 @@
 Loads configuration from environment variables and optional `.env` file.
 Model tiers implement FinOps routing: cheaper models for parse/eval work,
 stronger models for architecture and review.
+
+Default provider is Google Gemini (free tier via Google AI Studio).
 """
 
 from __future__ import annotations
@@ -41,17 +43,27 @@ class Settings(BaseSettings):
     )
 
     # --- LLM providers ---
+    # Default: Gemini (free from Google AI Studio)
+    llm_provider: Literal["gemini", "openai", "anthropic"] = Field(
+        default="gemini", alias="LLM_PROVIDER"
+    )
+    gemini_api_key: Optional[SecretStr] = Field(default=None, alias="GEMINI_API_KEY")
     openai_api_key: Optional[SecretStr] = Field(default=None, alias="OPENAI_API_KEY")
     anthropic_api_key: Optional[SecretStr] = Field(default=None, alias="ANTHROPIC_API_KEY")
-    llm_provider: Literal["openai", "anthropic"] = Field(default="openai", alias="LLM_PROVIDER")
 
-    # --- Model tiers (FinOps) ---
+    # --- Model tiers (FinOps) — Gemini free-tier defaults ---
     # Low: parse, format, test-result evaluation
-    model_low: str = Field(default="gpt-4o-mini", alias="MODEL_LOW")
-    # Mid: RAG retrieval correlation, structure analysis, patch generation
-    model_mid: str = Field(default="gpt-4o", alias="MODEL_MID")
+    model_low: str = Field(default="gemini-3.6-flash", alias="MODEL_LOW")
+    # Mid: RAG correlation, structure analysis, patch generation
+    model_mid: str = Field(default="gemini-3.6-flash", alias="MODEL_MID")
     # High: final verification, edge-case tests, strict PR review
-    model_high: str = Field(default="o3-mini", alias="MODEL_HIGH")
+    # Use flash for HIGH as well so the entire pipeline stays on the free tier.
+    model_high: str = Field(default="gemini-3.6-flash", alias="MODEL_HIGH")
+
+    # OpenAI alternatives when LLM_PROVIDER=openai
+    model_low_openai: str = Field(default="gpt-4o-mini", alias="MODEL_LOW_OPENAI")
+    model_mid_openai: str = Field(default="gpt-4o", alias="MODEL_MID_OPENAI")
+    model_high_openai: str = Field(default="o3-mini", alias="MODEL_HIGH_OPENAI")
 
     # Anthropic alternatives when LLM_PROVIDER=anthropic
     model_low_anthropic: str = Field(default="claude-3-haiku-20240307", alias="MODEL_LOW_ANTHROPIC")
@@ -76,6 +88,7 @@ class Settings(BaseSettings):
         default=None, alias="GOOGLE_APPLICATION_CREDENTIALS"
     )
     gdrive_folder_id: Optional[str] = Field(default=None, alias="GDRIVE_FOLDER_ID")
+    gdrive_bug_file_id: Optional[str] = Field(default=None, alias="GDRIVE_BUG_FILE_ID")
 
     # --- Runtime defaults (overridable via CLI) ---
     default_target_repo_path: Optional[Path] = Field(default=None, alias="TARGET_REPO_PATH")
@@ -94,7 +107,14 @@ class Settings(BaseSettings):
                 ModelTier.MID: self.model_mid_anthropic,
                 ModelTier.HIGH: self.model_high_anthropic,
             }
+        elif self.llm_provider == "openai":
+            mapping = {
+                ModelTier.LOW: self.model_low_openai,
+                ModelTier.MID: self.model_mid_openai,
+                ModelTier.HIGH: self.model_high_openai,
+            }
         else:
+            # gemini (default) — MODEL_LOW / MID / HIGH apply directly
             mapping = {
                 ModelTier.LOW: self.model_low,
                 ModelTier.MID: self.model_mid,

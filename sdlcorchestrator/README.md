@@ -65,28 +65,28 @@ cp .env.example .env        # then edit values
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENAI_API_KEY` | Yes* | OpenAI key (default provider) |
-| `ANTHROPIC_API_KEY` | Yes* | Used when `LLM_PROVIDER=anthropic` |
-| `LLM_PROVIDER` | No | `openai` (default) or `anthropic` |
+| `GEMINI_API_KEY` | Yes* | Free key from [Google AI Studio](https://aistudio.google.com/apikey) |
+| `LLM_PROVIDER` | No | `gemini` (default), `openai`, or `anthropic` |
+| `OPENAI_API_KEY` | No | Only if `LLM_PROVIDER=openai` |
+| `ANTHROPIC_API_KEY` | No | Only if `LLM_PROVIDER=anthropic` |
 | `GITHUB_TOKEN` | For PRs | Fine-grained or classic token with PR permissions |
-| `GOOGLE_APPLICATION_CREDENTIALS` | For Drive | Path to service-account JSON |
+| `GOOGLE_APPLICATION_CREDENTIALS` | For Drive | Path to OAuth Desktop or service-account JSON |
 | `GDRIVE_FOLDER_ID` | Optional | Default Drive folder for bulk load |
+| `GDRIVE_BUG_FILE_ID` | Optional | Default bug-report Drive file ID |
 | `GITHUB_REPO_NAME` | Optional | Default `owner/repo` |
 | `TARGET_REPO_PATH` | Optional | Default local repo path |
 | `MODEL_LOW` / `MODEL_MID` / `MODEL_HIGH` | No | Override FinOps model IDs |
 | `ENABLE_REVISION_LOOP` | No | `true`/`false` — review → fix loop |
 
-\*Without an LLM key the pipeline runs in **StubLLM dry-run** mode (useful for scaffolding / CI wiring).
+\*Without a usable LLM key the pipeline runs in **StubLLM dry-run** mode.
 
-### Model Tier Defaults
+### Model Tier Defaults (Gemini free tier)
 
-| Tier | OpenAI default | Anthropic default | Used for |
-|------|----------------|-------------------|----------|
-| Low | `gpt-4o-mini` | `claude-3-haiku-20240307` | Parsing, test-output eval |
-| Mid | `gpt-4o` | `claude-3-5-sonnet-20241022` | RAG correlation, patches |
-| High | `o3-mini` | `claude-3-5-sonnet-20241022` | Final review / edge cases |
-
-Override via env, e.g. `MODEL_HIGH=gpt-4o`.
+| Tier | Gemini default | Used for |
+|------|----------------|----------|
+| Low | `gemini-3.6-flash` | Parsing, test-output eval |
+| Mid | `gemini-3.6-flash` | RAG correlation, patches |
+| High | `gemini-3.6-flash` | Final review / edge cases |
 
 ### Google Drive
 
