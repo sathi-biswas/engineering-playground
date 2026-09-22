@@ -52,13 +52,13 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[SecretStr] = Field(default=None, alias="ANTHROPIC_API_KEY")
 
     # --- Model tiers (FinOps) — Gemini free-tier defaults ---
+    # Prefer flash-lite (~500 RPD) over full flash (~20 RPD) for local iteration.
     # Low: parse, format, test-result evaluation
-    model_low: str = Field(default="gemini-3.6-flash", alias="MODEL_LOW")
+    model_low: str = Field(default="gemini-3.5-flash-lite", alias="MODEL_LOW")
     # Mid: RAG correlation, structure analysis, patch generation
-    model_mid: str = Field(default="gemini-3.6-flash", alias="MODEL_MID")
+    model_mid: str = Field(default="gemini-3.5-flash-lite", alias="MODEL_MID")
     # High: final verification, edge-case tests, strict PR review
-    # Use flash for HIGH as well so the entire pipeline stays on the free tier.
-    model_high: str = Field(default="gemini-3.6-flash", alias="MODEL_HIGH")
+    model_high: str = Field(default="gemini-3.5-flash-lite", alias="MODEL_HIGH")
 
     # OpenAI alternatives when LLM_PROVIDER=openai
     model_low_openai: str = Field(default="gpt-4o-mini", alias="MODEL_LOW_OPENAI")
@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     # --- Test runner ---
     test_timeout_seconds: int = Field(default=300, ge=30, le=3600)
     pytest_args: str = Field(default="-q --tb=short", alias="PYTEST_ARGS")
+    # Prefer the target repo's venv so its deps (rich, jinja2, …) are available.
+    # Leave unset to auto-detect `.venv` / `venv` / `codecracker_venv` under the repo.
+    target_python_bin: Optional[str] = Field(default=None, alias="TARGET_PYTHON_BIN")
 
     def model_for_tier(self, tier: Union[ModelTier, str]) -> str:
         """Resolve the concrete model name for a FinOps tier."""

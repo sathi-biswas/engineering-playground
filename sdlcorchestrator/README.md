@@ -32,7 +32,7 @@ Artifacts are written as structured Markdown under [`output/`](output/).
 │   ├── logger.py             # Thought log + /output artifact writer
 │   ├── git_helper.py         # Branch, commit, push, PR, review
 │   ├── test_runner.py        # Isolated pytest subprocess runner
-│   └── model_router.py       # FinOps LLM factory (OpenAI / Anthropic)
+│   └── model_router.py       # FinOps LLM factory (Gemini / OpenAI / Anthropic)
 ├── tools/
 │   ├── gdrive_rag.py         # Drive auth, loader, FAISS/Chroma RAG
 │   └── code_parser.py        # AST + file tree analyzer
@@ -76,17 +76,26 @@ cp .env.example .env        # then edit values
 | `GITHUB_REPO_NAME` | Optional | Default `owner/repo` |
 | `TARGET_REPO_PATH` | Optional | Default local repo path |
 | `MODEL_LOW` / `MODEL_MID` / `MODEL_HIGH` | No | Override FinOps model IDs |
-| `ENABLE_REVISION_LOOP` | No | `true`/`false` — review → fix loop |
+| `PYTEST_ARGS` | No | Extra pytest flags (default `-q --tb=short`) |
+| `TARGET_PYTHON_BIN` | No | Python in the *target* repo venv; auto-detects `<repo>/.venv/bin/python` if unset |
 
 \*Without a usable LLM key the pipeline runs in **StubLLM dry-run** mode.
 
 ### Model Tier Defaults (Gemini free tier)
 
+Prefer **flash-lite** for local iteration. Full **flash** models are often capped at ~**20 requests/day** on the free tier (per project, resets midnight Pacific), which a single multi-agent run can exhaust. Flash-lite is typically ~**500 RPD**.
+
 | Tier | Gemini default | Used for |
 |------|----------------|----------|
-| Low | `gemini-3.6-flash` | Parsing, test-output eval |
-| Mid | `gemini-3.6-flash` | RAG correlation, patches |
-| High | `gemini-3.6-flash` | Final review / edge cases |
+| Low | `gemini-3.5-flash-lite` | Parsing, test-output eval |
+| Mid | `gemini-3.5-flash-lite` | RAG correlation, patches |
+| High | `gemini-3.5-flash-lite` | Final review / edge cases |
+
+Quota tips:
+- Limits are **per Google Cloud / AI Studio project**, not per API key.
+- On `429 ResourceExhausted`, the orchestrator fails fast (no second invoke, max 1 client retry).
+- Override via `MODEL_LOW` / `MODEL_MID` / `MODEL_HIGH` if AI Studio lists a different lite model ID.
+- See [Gemini rate limits](https://ai.google.dev/gemini-api/docs/rate-limits).
 
 ### Google Drive
 

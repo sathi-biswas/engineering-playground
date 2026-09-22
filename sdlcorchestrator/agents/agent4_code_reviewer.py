@@ -9,6 +9,7 @@ from state import CodeReviewResult, SDLCState
 from utils.git_helper import GitHelper, GitHelperError
 from utils.logger import get_artifact_writer, get_logger
 from utils.model_router import get_llm
+from utils.quota import QuotaExceededError
 from agents.llm_helpers import invoke_structured
 
 logger = get_logger(__name__)
@@ -32,6 +33,20 @@ def run_code_reviewer(state: SDLCState) -> dict[str, Any]:
     writer.append_thought(AGENT_NAME, "Starting PR code review")
 
     updates: dict[str, Any] = {"current_agent": AGENT_NAME}
+
+    prior_logs = state.get("error_logs") or []
+    if any(str(e).startswith("QUOTA_EXCEEDED") for e in prior_logs):
+        msg = "Skipping review — prior agent hit LLM quota"
+        writer.append_thought(AGENT_NAME, msg)
+        writer.write_error_artifact(AGENT_NAME, msg, context="QUOTA_EXCEEDED")
+        return {
+            **updates,
+            "review_decision": "REJECTED",
+            "review_confidence": 0.0,
+            "review_comments": msg,
+            "error_logs": [f"QUOTA_EXCEEDED: {AGENT_NAME}: {msg}"],
+            "pipeline_status": "HALTED",
+        }
 
     try:
         pr_url = state.get("pr_url") or ""
@@ -152,6 +167,18 @@ def run_code_reviewer(state: SDLCState) -> dict[str, Any]:
             f"Review complete decision={decision} confidence={result.confidence:.2f}",
         )
         return updates
+
+    except QuotaExceededError as exc:
+        logger.error("%s quota exceeded: %s", AGENT_NAME, exc)
+        writer.write_error_artifact(AGENT_NAME, str(exc), context="QUOTA_EXCEEDED")
+        return {
+            **updates,
+            "review_decision": "NEEDS_REVISION",
+            "review_confidence": 0.0,
+            "review_comments": str(exc),
+            "error_logs": [f"QUOTA_EXCEEDED: {AGENT_NAME}: {exc}"],
+            "pipeline_status": "HALTED",
+        }
 
     except Exception as exc:
         logger.exception("%s failed", AGENT_NAME)

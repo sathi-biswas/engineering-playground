@@ -10,6 +10,7 @@ from tools.gdrive_rag import GoogleDriveRAG, GoogleDriveRAGError
 from utils.logger import get_artifact_writer, get_logger
 from utils.model_router import get_llm
 from agents.llm_helpers import invoke_structured
+from utils.quota import QuotaExceededError
 
 logger = get_logger(__name__)
 
@@ -100,6 +101,19 @@ def run_bug_reader(state: SDLCState) -> dict[str, Any]:
             )
 
         return updates
+
+    except QuotaExceededError as exc:
+        logger.error("%s quota exceeded: %s", AGENT_NAME, exc)
+        writer.write_error_artifact(AGENT_NAME, str(exc), context="QUOTA_EXCEEDED")
+        writer.append_thought(AGENT_NAME, f"QUOTA_EXCEEDED — {exc}")
+        return {
+            **updates,
+            "bug_description": state.get("bug_description") or f"ERROR: {exc}",
+            "extraction_confidence": 0.0,
+            "analysis_confidence": 0.0,
+            "error_logs": [f"QUOTA_EXCEEDED: {AGENT_NAME}: {exc}"],
+            "pipeline_status": "HALTED",
+        }
 
     except Exception as exc:
         logger.exception("%s failed", AGENT_NAME)

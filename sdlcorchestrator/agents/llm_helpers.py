@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
 from utils.logger import get_logger
+from utils.quota import raise_if_quota_error
 
 logger = get_logger(__name__)
 
@@ -20,11 +21,9 @@ T = TypeVar("T", bound=BaseModel)
 def extract_json_block(text: str) -> dict[str, Any]:
     """Extract the first JSON object from an LLM response string."""
     text = text.strip()
-    # Fenced block
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fence:
         return json.loads(fence.group(1))
-    # Raw object
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
@@ -43,20 +42,29 @@ def invoke_structured(
 
     Prefers ``with_structured_output`` when available; falls back to JSON
     extraction from free-form text.
+
+    On Gemini free-tier ``429 ResourceExhausted``, does **not** fall through to
+    a second ``llm.invoke`` (avoids double-burning daily RPD).
     """
+    messages = [SystemMessage(content=system), HumanMessage(content=human)]
+
     try:
         structured = llm.with_structured_output(schema)
-        result = structured.invoke(
-            [SystemMessage(content=system), HumanMessage(content=human)]
-        )
+        result = structured.invoke(messages)
         if isinstance(result, schema):
             return result
         if isinstance(result, dict):
             return schema.model_validate(result)
     except Exception as exc:
+        raise_if_quota_error(exc)
         logger.debug("structured_output unavailable (%s); using JSON parse", exc)
 
-    response = llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
+    try:
+        response = llm.invoke(messages)
+    except Exception as exc:
+        raise_if_quota_error(exc)
+        raise
+
     content = response.content if hasattr(response, "content") else str(response)
     if isinstance(content, list):
         content = " ".join(

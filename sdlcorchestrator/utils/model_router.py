@@ -129,6 +129,8 @@ def _build_gemini_llm(
         model=model_name,
         google_api_key=key,
         temperature=temperature,
+        # Avoid burning free-tier RPD on exponential 429 retries (2s..32s × N).
+        max_retries=1,
         **safe_kwargs,
     )
 

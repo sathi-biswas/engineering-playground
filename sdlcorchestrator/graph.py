@@ -28,12 +28,23 @@ def error_handler_node(state: SDLCState) -> dict[str, Any]:
     errors = state.get("error_logs") or []
     reason_parts = []
 
+    if any(str(e).startswith("QUOTA_EXCEEDED") for e in errors):
+        reason_parts.append(
+            "LLM quota exceeded (free-tier RPD/RPM) — wait until midnight PT, "
+            "switch MODEL_* to gemini-3.5-flash-lite (~500 RPD), or enable billing"
+        )
+
     analysis_conf = float(state.get("analysis_confidence") or 0.0)
     settings = get_settings()
-    if analysis_conf < settings.confidence_threshold and state.get("current_agent") in {
-        "Agent2_CodeAnalyzer",
-        "error_handler",
-    }:
+    if (
+        not reason_parts
+        and analysis_conf < settings.confidence_threshold
+        and state.get("current_agent")
+        in {
+            "Agent2_CodeAnalyzer",
+            "error_handler",
+        }
+    ):
         reason_parts.append(
             f"analysis_confidence {analysis_conf:.2f} < {settings.confidence_threshold}"
         )
@@ -111,10 +122,28 @@ def finalize_node(state: SDLCState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _has_quota_exceeded(state: SDLCState) -> bool:
+    logs = state.get("error_logs") or []
+    return any(str(e).startswith("QUOTA_EXCEEDED") for e in logs)
+
+
+def route_after_ingestion(
+    state: SDLCState,
+) -> Literal["agent2_code_analyzer", "error_handler"]:
+    """Skip remaining agents when Agent 1 already hit free-tier quota."""
+    if _has_quota_exceeded(state):
+        logger.warning("Routing to error_handler — LLM quota exceeded after Agent 1")
+        return "error_handler"
+    return "agent2_code_analyzer"
+
+
 def route_after_analysis(
     state: SDLCState,
 ) -> Literal["agent3_bug_fixer", "error_handler"]:
     """Gate: require analysis_confidence >= threshold before patching."""
+    if _has_quota_exceeded(state):
+        logger.warning("Routing to error_handler — LLM quota exceeded after analysis")
+        return "error_handler"
     settings = get_settings()
     conf = float(state.get("analysis_confidence") or 0.0)
     if conf < settings.confidence_threshold:
@@ -131,6 +160,8 @@ def route_after_fix(
     state: SDLCState,
 ) -> Literal["agent3_bug_fixer", "agent4_code_reviewer", "error_handler"]:
     """Retry failed tests up to max_fix_retries, else continue or halt."""
+    if _has_quota_exceeded(state):
+        return "error_handler"
     settings = get_settings()
     tests = state.get("test_results") or {}
     attempt = int(state.get("fix_attempt") or 0)
@@ -161,6 +192,8 @@ def route_after_review(
     state: SDLCState,
 ) -> Literal["agent3_bug_fixer", "finalize", "error_handler"]:
     """Optionally loop back to Agent 3 on NEEDS_REVISION."""
+    if _has_quota_exceeded(state):
+        return "error_handler"
     settings = get_settings()
     decision = state.get("review_decision")
     revision_count = int(state.get("revision_count") or 0)
@@ -199,7 +232,14 @@ def build_graph() -> Any:
     graph.add_node("finalize", finalize_node)
 
     graph.set_entry_point("agent1_bug_reader")
-    graph.add_edge("agent1_bug_reader", "agent2_code_analyzer")
+    graph.add_conditional_edges(
+        "agent1_bug_reader",
+        route_after_ingestion,
+        {
+            "agent2_code_analyzer": "agent2_code_analyzer",
+            "error_handler": "error_handler",
+        },
+    )
     graph.add_conditional_edges(
         "agent2_code_analyzer",
         route_after_analysis,

@@ -10,6 +10,7 @@ from tools.code_parser import CodeParser
 from utils.logger import get_artifact_writer, get_logger
 from utils.model_router import get_llm
 from agents.llm_helpers import invoke_structured
+from utils.quota import QuotaExceededError
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,21 @@ def run_code_analyzer(state: SDLCState) -> dict[str, Any]:
     writer.append_thought(AGENT_NAME, "Starting codebase analysis")
 
     updates: dict[str, Any] = {"current_agent": AGENT_NAME}
+
+    # Fail fast if a prior node already exhausted free-tier quota
+    prior_logs = state.get("error_logs") or []
+    if any(str(e).startswith("QUOTA_EXCEEDED") for e in prior_logs):
+        msg = "Skipping analysis — prior agent hit LLM quota"
+        writer.append_thought(AGENT_NAME, msg)
+        writer.write_error_artifact(AGENT_NAME, msg, context="QUOTA_EXCEEDED")
+        return {
+            **updates,
+            "affected_files": [],
+            "code_analysis_summary": msg,
+            "analysis_confidence": 0.0,
+            "error_logs": [f"QUOTA_EXCEEDED: {AGENT_NAME}: {msg}"],
+            "pipeline_status": "HALTED",
+        }
 
     try:
         repo_path = state.get("target_repo_path") or ""
@@ -115,6 +131,18 @@ def run_code_analyzer(state: SDLCState) -> dict[str, Any]:
             f"files={updates['affected_files']}",
         )
         return updates
+
+    except QuotaExceededError as exc:
+        logger.error("%s quota exceeded: %s", AGENT_NAME, exc)
+        writer.write_error_artifact(AGENT_NAME, str(exc), context="QUOTA_EXCEEDED")
+        return {
+            **updates,
+            "affected_files": [],
+            "code_analysis_summary": f"ERROR: {exc}",
+            "analysis_confidence": 0.0,
+            "error_logs": [f"QUOTA_EXCEEDED: {AGENT_NAME}: {exc}"],
+            "pipeline_status": "HALTED",
+        }
 
     except Exception as exc:
         logger.exception("%s failed", AGENT_NAME)

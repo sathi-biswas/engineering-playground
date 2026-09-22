@@ -13,6 +13,7 @@ from utils.git_helper import GitHelper, GitHelperError
 from utils.logger import get_artifact_writer, get_logger
 from utils.model_router import get_llm
 from utils.test_runner import TestRunner
+from utils.quota import QuotaExceededError
 from agents.llm_helpers import invoke_structured
 
 logger = get_logger(__name__)
@@ -46,6 +47,24 @@ def run_bug_fixer(state: SDLCState) -> dict[str, Any]:
         "current_agent": AGENT_NAME,
         "fix_attempt": attempt,
     }
+
+    prior_logs = state.get("error_logs") or []
+    if any(str(e).startswith("QUOTA_EXCEEDED") for e in prior_logs):
+        msg = "Skipping patch — prior agent hit LLM quota"
+        writer.append_thought(AGENT_NAME, msg)
+        writer.write_error_artifact(AGENT_NAME, msg, context="QUOTA_EXCEEDED")
+        return {
+            **updates,
+            "fix_confidence": 0.0,
+            "test_results": {
+                "passed": False,
+                "output": msg,
+                "attempts": attempt,
+                "exit_code": -1,
+            },
+            "error_logs": [f"QUOTA_EXCEEDED: {AGENT_NAME}: {msg}"],
+            "pipeline_status": "HALTED",
+        }
 
     try:
         bug_id = state.get("bug_id") or "unknown"
@@ -135,6 +154,11 @@ def run_bug_fixer(state: SDLCState) -> dict[str, Any]:
         # --- Run tests ---
         runner = TestRunner(repo_path)
         run_result = runner.run_pytest()
+        writer.append_thought(
+            AGENT_NAME,
+            f"pytest via {run_result.python_bin} (fallback={run_result.used_fallback}) "
+            f"exit={run_result.exit_code}",
+        )
         eval_llm = get_llm(tier=ModelTier.LOW, temperature=0.0)
         evaluation = invoke_structured(
             eval_llm,
@@ -235,6 +259,22 @@ def run_bug_fixer(state: SDLCState) -> dict[str, Any]:
             },
         )
         return updates
+
+    except QuotaExceededError as exc:
+        logger.error("%s quota exceeded: %s", AGENT_NAME, exc)
+        writer.write_error_artifact(AGENT_NAME, str(exc), context="QUOTA_EXCEEDED")
+        return {
+            **updates,
+            "test_results": {
+                "passed": False,
+                "output": str(exc),
+                "attempts": attempt,
+                "exit_code": -1,
+            },
+            "fix_confidence": 0.0,
+            "error_logs": [f"QUOTA_EXCEEDED: {AGENT_NAME}: {exc}"],
+            "pipeline_status": "HALTED",
+        }
 
     except Exception as exc:
         logger.exception("%s failed", AGENT_NAME)
