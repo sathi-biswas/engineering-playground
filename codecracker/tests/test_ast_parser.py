@@ -83,6 +83,21 @@ class TestIterCodeFiles:
         paths = iter_code_files(sample_repo, settings)
         assert len(paths) == 2
 
+    def test_max_files_deterministic_and_prioritizes_shallow(self, tmp_path: Path) -> None:
+        # Create a deep file and a shallow file
+        shallow = tmp_path / "a.py"
+        shallow.write_text("print('shallow')", encoding="utf-8")
+
+        deep_dir = tmp_path / "very" / "deep" / "nested" / "dir"
+        deep_dir.mkdir(parents=True)
+        deep = deep_dir / "b.py"
+        deep.write_text("print('deep')", encoding="utf-8")
+
+        settings = Settings(max_files=1)
+        paths = iter_code_files(tmp_path, settings)
+        assert len(paths) == 1
+        assert paths[0].name == "a.py"
+
 
 class TestParseFile:
     def test_python_ast_captures_imports_classes_functions(self, sample_repo: Path) -> None:
