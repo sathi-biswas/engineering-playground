@@ -68,9 +68,7 @@ def iter_code_files(root: Path, settings: Settings) -> list[Path]:
         except OSError:
             continue
         found.append(path)
-        if len(found) >= settings.max_files:
-            break
-    return sorted(found)
+    return sorted(found)[:settings.max_files]
 
 
 def _rel(root: Path, path: Path) -> str:

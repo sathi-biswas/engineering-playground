@@ -83,6 +83,16 @@ class TestIterCodeFiles:
         paths = iter_code_files(sample_repo, settings)
         assert len(paths) == 2
 
+    def test_max_files_applied_after_sorting(self, tmp_path: Path) -> None:
+        # Create files where lexicographical / sorted order differs from creation order
+        (tmp_path / "z_file.py").write_text("pass\n", encoding="utf-8")
+        (tmp_path / "a_file.py").write_text("pass\n", encoding="utf-8")
+        
+        settings = Settings(max_files=1)
+        paths = iter_code_files(tmp_path, settings)
+        assert len(paths) == 1
+        assert paths[0].name == "a_file.py"
+
 
 class TestParseFile:
     def test_python_ast_captures_imports_classes_functions(self, sample_repo: Path) -> None:
